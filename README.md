@@ -1,7 +1,7 @@
-# CoreOS Vagrant
+# Paz Vagrant
 
-This repo provides a template Vagrantfile to create a CoreOS virtual machine using the VirtualBox software hypervisor.
-After setup is complete you will have a single CoreOS virtual machine running on your local machine.
+This repo provides a template Vagrantfile to create a Paz (CoreOS) virtual machine using the VirtualBox software hypervisor.
+After setup is complete you will have a single Paz virtual machine running on your local machine.
 
 ## Streamlined setup
 
@@ -13,8 +13,8 @@ After setup is complete you will have a single CoreOS virtual machine running on
 2) Clone this project and get it running!
 
 ```
-git clone https://github.com/coreos/coreos-vagrant/
-cd coreos-vagrant
+git clone https://github.com/paz-sh/paz-vagrant/
+cd paz-vagrant
 ```
 
 3) Startup and SSH
@@ -57,7 +57,7 @@ Configuration is stored in the directory so you can always return to this machin
 
 [virtualbox]: https://www.virtualbox.org/
 [vagrant]: https://www.vagrantup.com/downloads.html
-[using-coreos]: http://coreos.com/docs/using-coreos/
+[using-paz]: http://paz.readme.io/v1.0/docs/deploying-your-first-application-using-paz
 
 #### Shared Folder Setup
 
@@ -73,7 +73,7 @@ After a 'vagrant reload' you will be prompted for your local machine password.
 
 #### Provisioning with user-data
 
-The Vagrantfile will provision your CoreOS VM(s) with [coreos-cloudinit][coreos-cloudinit] if a `user-data` file is found in the project directory.
+The Vagrantfile will provision your Paz VM(s) with [coreos-cloudinit][coreos-cloudinit] if a `user-data` file is found in the project directory.
 coreos-cloudinit simplifies the provisioning process through the use of a script or cloud-config document.
 
 To get started, copy `user-data.sample` to `user-data` and make any necessary modifications.
