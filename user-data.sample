@@ -1,26 +1,17 @@
 #cloud-config
 
 coreos:
+  # Remove this as we want to reboot to update to latest version, maybe not for vagarnt as of yet as we should push this to CI.
+  update:
+    reboot-strategy: off
+  # Update to etcd2
   etcd:
-    # generate a new token for each unique cluster from https://discovery.etcd.io/new
-    # WARNING: replace each time you 'vagrant destroy'
-    #discovery: https://discovery.etcd.io/<token>
+    #generate a new token for each unique cluster from https://discovery.etcd.io/new
+    discovery: https://discovery.etcd.io/0fb290c2f54d9338f0abefe73745f8cd
     addr: $public_ipv4:4001
     peer-addr: $public_ipv4:7001
-  etcd2:
-    #generate a new token for each unique cluster from https://discovery.etcd.io/new
-    #discovery: https://discovery.etcd.io/<token>
-    # multi-region and multi-cloud deployments need to use $public_ipv4
-    advertise-client-urls: http://$public_ipv4:2379
-    initial-advertise-peer-urls: http://$private_ipv4:2380
-    # listen on both the official ports and the legacy ports
-    # legacy ports can be omitted if your application doesn't depend on them
-    listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
-    listen-peer-urls: http://$private_ipv4:2380,http://$private_ipv4:7001
   fleet:
     public-ip: $public_ipv4
-  flannel:
-    interface: $public_ipv4
   units:
     - name: etcd.service
       command: start
@@ -30,17 +21,116 @@ coreos:
     #  command: start
     - name: fleet.service
       command: start
-    - name: docker-tcp.socket
+    - name: docker.service
+      drop-ins:
+        - name: 50-docker-dns.conf
+          content: |
+              [Service]
+              Environment='DOCKER_OPTS=--restart=false -D --dns=$private_ipv4 --dns=8.8.8.8'
+    - name: cadvisor.service
+      runtime: true
       command: start
-      enable: true
       content: |
         [Unit]
-        Description=Docker Socket for the API
+        Description=Analyzes resource usage and performance characteristics of running containers.
+        After=docker.service
+        Requires=docker.service
 
-        [Socket]
-        ListenStream=2375
-        Service=docker.service
-        BindIPv6Only=both
+        [Service]
+        Restart=always
+        ExecStartPre=/usr/bin/docker pull google/cadvisor:latest
+        ExecStartPre=-/bin/bash -c " \
+          docker inspect cadvisor >/dev/null 2>&1 \
+          && docker rm -f cadvisor || true"
+        ExecStart=/usr/bin/docker run --volume=/var/run:/var/run:rw --volume=/sys/fs/cgroup/:/sys/fs/cgroup:ro --volume=/var/lib/docker/:/var/lib/docker:ro --publish=8080:8080 --name=cadvisor google/cadvisor:latest
+        ExecStop=/usr/bin/docker rm -f cadvisor
+    - name: paz-dnsmasq.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=*.paz traffic will go to the private_ipv4 addr
+        After=docker.service
+        Requires=docker.service
 
-        [Install]
-        WantedBy=sockets.target
+        After=etcd.service
+        Requires=etcd.service
+        After=fleet.service
+        Requires=fleet.service
+
+        [Service]
+        Restart=always
+        ExecStartPre=/usr/bin/docker pull tomgco/dnsmasq-catch:latest
+        ExecStartPre=-/bin/bash -c " \
+          docker inspect paz-dnsmasq >/dev/null 2>&1 \
+          && docker rm -f paz-dnsmasq || true"
+        ExecStart=/usr/bin/docker run -p $private_ipv4:53:53/udp --privileged --name=paz-dnsmasq tomgco/dnsmasq-catch paz $private_ipv4
+        ExecStop=/usr/bin/docker rm -f paz-dnsmasq
+    - name: paz-haproxy.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=paz HAProxy instance that enables service discovery.
+        After=docker.service
+        Requires=docker.service
+
+        After=etcd.service
+        Requires=etcd.service
+        After=fleet.service
+        Requires=fleet.service
+
+        [Service]
+        User=core
+        Restart=always
+        RestartSec=5s
+        ExecStartPre=/usr/bin/docker pull quay.io/yldio/paz-haproxy:latest
+        ExecStartPre=-/bin/bash -c " \
+          docker inspect paz-haproxy >/dev/null 2>&1 \
+          && docker rm -f paz-haproxy || true"
+        ExecStart=/usr/bin/docker run -p 80:80 -p 1936:1936 -e ETCD=$private_ipv4:4001 --name paz-haproxy quay.io/yldio/paz-haproxy
+        ExecStop=/usr/bin/docker rm -f paz-haproxy
+        TimeoutStartSec=20m
+    - name: paz-pubkey-watcher.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Watch etcd for scheduler public key changes and update authorized_hosts.
+
+        After=etcd.service
+        Requires=etcd.service
+        After=fleet.service
+        Requires=fleet.service
+
+        [Service]
+        User=core
+        Restart=always
+        ExecStartPre=/home/core/bin/paz-pubkey-watcher.sh once
+        ExecStart=/home/core/bin/paz-pubkey-watcher.sh
+
+write_files:
+  - path: /etc/paz-environment
+    permissions: 0644
+    content: |
+        PAZ_PLATFORM=vagrant
+        PAZ_DOMAIN=paz
+        PAZ_ORCHESTRATOR_DNS_DISABLED=true
+        PAZ_ORCHESTRATOR_CORS=true
+  - path: /home/core/bin/paz-pubkey-watcher.sh
+    owner: core
+    permissions: 0754
+    content: |
+        #!/bin/bash
+        set -e
+        if [[ "$1" == "once" ]]; then
+          FN=`mktemp /tmp/paz-pubkey.XXXX`
+          until etcdctl get /paz/config/scheduler/_pubkey 2>/dev/null > $FN.tmp; do sleep 2; done && base64 -d < $FN.tmp > $FN && /usr/bin/update-ssh-keys -u core -a paz-scheduler $FN
+          rm $FN $FN.tmp
+        else
+          while :; do
+            FN=`mktemp /tmp/paz-pubkey.XXXX`
+            etcdctl watch /paz/config/scheduler/_pubkey | base64 -d > $FN && /usr/bin/update-ssh-keys -u core -a paz-scheduler $FN;
+            rm $FN
+          done;
+        fi
